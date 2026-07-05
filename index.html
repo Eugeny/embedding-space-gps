@@ -9,7 +9,7 @@
   #q{background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:8px 12px;border-radius:6px;width:280px}
   #status{margin:12px 0;color:#8b949e}
   #grid{display:flex;flex-direction:column;gap:3px}
-  .row{display:grid;gap:3px;grid-template-columns:44px repeat(11,1fr);align-items:stretch;border-radius:6px}
+  .row{display:grid;gap:3px;grid-template-columns: max-content 44px repeat(11,1fr);align-items:stretch;border-radius:6px}
   .row:hover{background:#161b2280}
   .row:hover .cell{border-color:#30363d;background:#1c2331}
   .cell{padding:3px 5px;border-radius:5px;background:#161b22;border:1px solid #21262d;overflow:hidden;min-width:0}
@@ -54,121 +54,233 @@
 <div id="top"></div>
 <div id="grid"></div>
 <script>
-let W=null; // {dimension, words, vecs, index}
-const status=document.getElementById('status'), grid=document.getElementById('grid'), q=document.getElementById('q');
-const SIDE=5; // words per side per axis
+"use strict";
 
-// vectors.json.gz is ~10MB (vs 46MB raw) so GitHub Pages can deploy it; decompress in the browser
-fetch('vectors.json.gz').then(r=>r.body.pipeThrough(new DecompressionStream('gzip'))).then(s=>new Response(s).json()).then(d=>{
-  d.index=new Map(); d.words.forEach((w,i)=>{if(!d.index.has(w))d.index.set(w,i);}); // prefer first (english)
-  d.norms=d.vecs.map(v=>{let s=0;for(const x of v)s+=x*x;return Math.sqrt(s);}); // for cosine
-  d.enCount=d.langs?d.langs.indexOf('ja'):d.words.length; if(d.enCount<0)d.enCount=d.words.length; // en words are first
+// ---- element refs ----
+const statusEl   = document.getElementById('status');
+const gridEl     = document.getElementById('grid');
+const topEl      = document.getElementById('top');
+const queryInput = document.getElementById('q');
+const jaToggle   = document.getElementById('ja');
+const dimBar     = document.getElementById('dimbar');
+const dimLabel   = document.getElementById('dimlabel');
+const multiInput = document.getElementById('multi');
+const backBtn    = document.getElementById('back');
 
-  status.textContent=`${d.words.length} words loaded — indexing ${d.dim} axes…`;
-  setTimeout(()=>{ // sort every axis once so queries don't have to (keeps it fast at 24k words)
-    const N=d.words.length, D=d.dim; d.orders=[];
-    for(let dd=0;dd<D;dd++){ const ord=Int32Array.from({length:N},(_,i)=>i); ord.sort((a,b)=>d.vecs[a][dd]-d.vecs[b][dd]); d.orders.push(ord); }
-    W=d; status.textContent=`${d.words.length} words loaded (en + ja, aligned). try an english word.`;
-    if(location.hash) { q.value=decodeURIComponent(location.hash.slice(1)); run(); }
-  },0);
-}).catch(e=>status.textContent='failed to load vectors.json — serve this folder over http (see note).');
+// ---- constants ----
+const BUCKETS = 11;      // columns: each axis is split into this many value bands
+const PER_BUCKET = 5;    // words shown inside each bucket
 
-const NB=11; // buckets per axis (columns)
-const topEl=document.getElementById('top');
-// k nearest words by cosine in the full space
-function nearest(qi,k,N){
-  const qv=W.vecs[qi], qn=W.norms[qi], D=qv.length, out=[];
-  for(let i=0;i<N;i++){ if(i===qi) continue; const v=W.vecs[i]; let dot=0; for(let d=0;d<D;d++) dot+=qv[d]*v[d]; out.push([i,dot/(qn*W.norms[i])]); }
-  out.sort((a,b)=>b[1]-a[1]); return out.slice(0,k);
+// ---- state ----
+let DATA = null;         // {dim, words[], vecs[][], langs[], index, norms[], enCount, orders[]}
+let focusAxis = null;    // null = all-axes view; a number = single-axis compare view
+
+// ---- load & index the embedding data ----
+// vectors.json.gz is ~10MB (vs 46MB raw) so GitHub Pages can deploy it; we decompress it in the browser.
+fetch('vectors.json.gz')
+  .then(r => r.body.pipeThrough(new DecompressionStream('gzip')))
+  .then(s => new Response(s).json())
+  .then(data => {
+    // english words come first in the file; keep the first index per word so english wins on collisions
+    data.index = new Map();
+    data.words.forEach((w, i) => { if (!data.index.has(w)) data.index.set(w, i); });
+    data.norms = data.vecs.map(v => Math.hypot(...v));                          // vector lengths, for cosine
+    data.enCount = data.langs ? data.langs.indexOf('ja') : data.words.length;   // first japanese index
+    if (data.enCount < 0) data.enCount = data.words.length;
+
+    statusEl.textContent = `${data.words.length} words loaded — indexing ${data.dim} axes…`;
+    // sort every axis once up front, so a query never re-sorts 24k words (keeps queries snappy)
+    setTimeout(() => {
+      data.orders = [];
+      for (let axis = 0; axis < data.dim; axis++) {
+        const order = Int32Array.from({ length: data.words.length }, (_, i) => i);
+        order.sort((a, b) => data.vecs[a][axis] - data.vecs[b][axis]);
+        data.orders.push(order);
+      }
+      DATA = data;
+      statusEl.textContent = `${data.words.length} words loaded (en + ja, aligned). try an english word.`;
+      if (location.hash) { queryInput.value = decodeURIComponent(location.hash.slice(1)); run(); }
+    }, 0);
+  })
+  .catch(() => { statusEl.textContent = 'failed to load vectors.json.gz — serve this folder over http.'; });
+
+// words active right now (japanese sit at the end, so we just cap the count to drop them)
+const activeVocabSize = () => jaToggle.checked ? DATA.words.length : DATA.enCount;
+
+// the k cosine-nearest neighbours across the whole space
+function nearestByCosine(wordIdx, k, vocabSize) {
+  const vec = DATA.vecs[wordIdx], norm = DATA.norms[wordIdx], scored = [];
+  for (let i = 0; i < vocabSize; i++) {
+    if (i === wordIdx) continue;
+    const v = DATA.vecs[i];
+    let dot = 0;
+    for (let d = 0; d < vec.length; d++) dot += vec[d] * v[d];
+    scored.push([i, dot / (norm * DATA.norms[i])]);
+  }
+  scored.sort((a, b) => b[1] - a[1]);
+  return scored.slice(0, k);
 }
-function cell(idxs,d,cls,qi){
-  const inner=idxs.map(i=>{
-    const cls=[i===qi?'q':'', W.langs&&W.langs[i]==='ja'?'ja':''].filter(Boolean).join(' ');
-    return `<b class="${cls}" title="${W.words[i]} — axis ${d}: ${W.vecs[i][d].toFixed(3)}"><span>${W.words[i]}</span><i>${W.vecs[i][d].toFixed(2)}</i></b>`;
+
+// squared euclidean distance from `wordIdx` to every word, across ALL axes.
+// depends only on the word, so we compute it once per query and reuse it for all axes.
+function squaredDistances(wordIdx, vocabSize) {
+  const vec = DATA.vecs[wordIdx], dist = new Float64Array(vocabSize);
+  for (let i = 0; i < vocabSize; i++) {
+    if (i === wordIdx) continue;
+    const v = DATA.vecs[i];
+    let sum = 0;
+    for (let d = 0; d < vec.length; d++) { const diff = v[d] - vec[d]; sum += diff * diff; }
+    dist[i] = sum;
+  }
+  return dist;
+}
+
+// the percentile column header shown above every grid
+function headerRow() {
+  let cells = '<div class="cell colhead">axis</div>';
+  for (let b = 0; b < BUCKETS; b++)
+    cells += `<div class="cell colhead">${Math.round((b + 0.5) / BUCKETS * 100)}%</div>`;
+  return `<div class="row">${cells}</div>`;
+}
+
+// one grid cell holding up to PER_BUCKET word tokens (word + its value on this axis)
+function renderCell(wordIdxs, axis, cellClass, queryIdx) {
+  const tokens = wordIdxs.map(i => {
+    const tokenClass = [
+      i === queryIdx ? 'q' : '',
+      DATA.langs && DATA.langs[i] === 'ja' ? 'ja' : '',
+    ].filter(Boolean).join(' ');
+    const value = DATA.vecs[i][axis];
+    return `<b class="${tokenClass}" title="${DATA.words[i]} — axis ${axis}: ${value.toFixed(3)}">`
+         + `<span>${DATA.words[i]}</span><i>${value.toFixed(2)}</i></b>`;
   }).join('');
-  return `<div class="cell ${cls}">${inner}</div>`;
+  return `<div class="cell ${cellClass}">${tokens}</div>`;
 }
 
-let focusDim=null;                       // null = all-dimensions view; number = single-axis compare
-const multi=document.getElementById('multi');
-const effN=()=>document.getElementById('ja').checked?W.words.length:W.enCount; // ja words are last; capping drops them
-function headerRow(){
-  let head='<div class="cell colhead">axis</div>';
-  for(let b=0;b<NB;b++) head+=`<div class="cell colhead">${Math.round((b+0.5)/NB*100)}%</div>`;
-  return `<div class="row">${head}</div>`;
-}
-// squared distance from word qi to every word, over ALL dims (depends on the word, not the axis)
-function fullDist(qi,N){
-  const qv=W.vecs[qi], D=qv.length, fs=new Float64Array(N);
-  for(let i=0;i<N;i++){ if(i===qi) continue; const v=W.vecs[i]; let s=0; for(let k=0;k<D;k++){const dk=v[k]-qv[k]; s+=dk*dk;} fs[i]=s; }
-  return fs;
-}
-// one bucket row: word qi sampled along axis d. clickable=true tags the header for axis-focus.
-function bucketCells(qi,d,fullSq,enOnly,label,clickable){
-  const qv=W.vecs[qi];
-  let order=W.orders[d];
-  if(enOnly){ const f=[]; for(let j=0;j<order.length;j++){const i=order[j]; if(i<W.enCount) f.push(i);} order=f; }
-  const M=order.length;
-  const qb=Math.min(NB-1,Math.floor(order.indexOf(qi)*NB/M)); // bucket the query falls in
-  let cells=`<div class="cell dhead${clickable?' click" data-dim="'+d+'" title="compare words on this axis':''}">${label}</div>`;
-  for(let b=0;b<NB;b++){
-    const lo=Math.floor(b*M/NB), hi=Math.floor((b+1)*M/NB);
-    // candidates in this axis-band, ranked by distance to query on the OTHER dims (full − this dim)
-    const cand=[];
-    for(let j=lo;j<hi;j++){ const i=order[j]; const dd=W.vecs[i][d]-qv[d]; cand.push([i,fullSq[i]-dd*dd]); }
-    cand.sort((a,b)=>a[1]-b[1]);
-    const idxs=cand.slice(0,5).map(x=>x[0]);
-    const cls=b===qb?'self':((b===0||b===NB-1)?'far':'');
-    cells+=cell(idxs,d,cls,qi);
+// build one row: `wordIdx` sampled along a single `axis`.
+// each bucket is a band of the axis; inside it we show the words closest to `wordIdx` on all OTHER axes.
+// `clickable` tags the row header so clicking it opens the compare view for this axis.
+function buildAxisRow(wordIdx, axis, distToWord, enOnly, label, clickable) {
+  const queryValue = DATA.vecs[wordIdx][axis];
+
+  // words sorted by their value on this axis (precomputed); drop japanese when the toggle is off
+  let order = DATA.orders[axis];
+  if (enOnly) order = Array.prototype.filter.call(order, i => i < DATA.enCount);
+  const count = order.length;
+
+  const queryBucket = Math.min(BUCKETS - 1, Math.floor(order.indexOf(wordIdx) * BUCKETS / count));
+
+  let cells = clickable
+    ? `<div class="cell dhead click" data-dim="${axis}" title="compare words on this axis">${label}</div>`
+    : `<div class="cell dhead">${label}</div>`;
+
+  for (let b = 0; b < BUCKETS; b++) {
+    const lo = Math.floor(b * count / BUCKETS);
+    const hi = Math.floor((b + 1) * count / BUCKETS);
+
+    // rank this band by distance to the query on the other axes = full distance minus this axis's part
+    const candidates = [];
+    for (let j = lo; j < hi; j++) {
+      const i = order[j];
+      const diffOnAxis = DATA.vecs[i][axis] - queryValue;
+      candidates.push([i, distToWord[i] - diffOnAxis * diffOnAxis]);
+    }
+    candidates.sort((a, b) => a[1] - b[1]);
+    const picked = candidates.slice(0, PER_BUCKET).map(c => c[0]);
+
+    const cellClass = b === queryBucket ? 'self' : (b === 0 || b === BUCKETS - 1 ? 'far' : '');
+    cells += renderCell(picked, axis, cellClass, wordIdx);
   }
   return cells;
 }
 
-function run(){ if(!W) return; grid.classList.toggle('dimmode',focusDim!==null); focusDim===null?renderAll():renderDim(); }
+// all-axes view: one row per axis for a single query word
+function renderAllAxes() {
+  const word = queryInput.value.trim().toLowerCase();
+  location.hash = encodeURIComponent(word);
 
-function renderAll(){                     // one row per dimension, single query word
-  const w=q.value.trim().toLowerCase();
-  location.hash=encodeURIComponent(w);
-  const qi=W.index.get(w);
-  if(qi===undefined){ grid.innerHTML=''; topEl.innerHTML=''; status.textContent=`"${w}" not in vocabulary.`; return; }
-  const N=effN(), enOnly=N!==W.words.length;
-  topEl.innerHTML='<h2>10 nearest overall (cosine):</h2>'+nearest(qi,10,N).map(([i,s])=>
-    `<span class="chip ${W.langs&&W.langs[i]==='ja'?'ja':''}"><b>${W.words[i]}</b><i>${s.toFixed(3)}</i></span>`).join('');
-  status.textContent=`“${w}” — each bucket: words in that axis-band, nearest to “${w}” on the other ${W.dim-1} axes (click a dim to compare words):`;
-  const fullSq=fullDist(qi,N);
-  let html=headerRow();
-  for(let d=0;d<W.dim;d++) html+=`<div class="row">${bucketCells(qi,d,fullSq,enOnly,'dim '+d,true)}</div>`;
-  grid.innerHTML=html;
-}
-
-function renderDim(){                     // one row per word, single focused axis
-  const d=focusDim, N=effN(), enOnly=N!==W.words.length;
-  document.getElementById('dimlabel').textContent=`dim ${d}`;
-  topEl.innerHTML='';
-  const wl=multi.value.trim().toLowerCase().split(/[\s,]+/).filter(Boolean);
-  let html=headerRow(); const missing=[];
-  for(const w of wl){
-    const qi=W.index.get(w);
-    if(qi===undefined){ missing.push(w); continue; }
-    const label=`<span class="wlabel${W.langs&&W.langs[qi]==='ja'?' wja':''}">${w}</span>`;
-    html+=`<div class="row">${bucketCells(qi,d,fullDist(qi,N),enOnly,label,false)}</div>`;
+  const wordIdx = DATA.index.get(word);
+  if (wordIdx === undefined) {
+    gridEl.innerHTML = ''; topEl.innerHTML = '';
+    statusEl.textContent = `"${word}" not in vocabulary.`;
+    return;
   }
-  grid.innerHTML=html;
-  status.textContent=`axis ${d} across ${wl.length-missing.length} word(s)`+(missing.length?` — not found: ${missing.join(', ')}`:'');
+
+  const vocabSize = activeVocabSize();
+  const enOnly = vocabSize !== DATA.words.length;
+
+  topEl.innerHTML = '<h2>10 nearest overall (cosine):</h2>' +
+    nearestByCosine(wordIdx, 10, vocabSize).map(([i, sim]) =>
+      `<span class="chip ${DATA.langs && DATA.langs[i] === 'ja' ? 'ja' : ''}">`
+      + `<b>${DATA.words[i]}</b><i>${sim.toFixed(3)}</i></span>`).join('');
+
+  statusEl.textContent =
+    `“${word}” — each bucket: words in that axis-band, nearest to “${word}” on the other ${DATA.dim - 1} axes (click a dim to compare words):`;
+
+  const distToWord = squaredDistances(wordIdx, vocabSize);
+  let html = headerRow();
+  for (let axis = 0; axis < DATA.dim; axis++)
+    html += `<div class="row">${buildAxisRow(wordIdx, axis, distToWord, enOnly, 'dim ' + axis, true)}</div>`;
+  gridEl.innerHTML = html;
 }
 
-function enterDim(d){
-  focusDim=d;
-  document.getElementById('dimbar').style.display='';
-  if(!multi.value.trim()) multi.value=(q.value.trim()||'king')+' queen man woman';
+// compare view: one row per word, all along the single focused axis
+function renderCompare() {
+  const axis = focusAxis;
+  const vocabSize = activeVocabSize();
+  const enOnly = vocabSize !== DATA.words.length;
+
+  dimLabel.textContent = `dim ${axis}`;
+  topEl.innerHTML = '';
+
+  const words = multiInput.value.trim().toLowerCase().split(/[\s,]+/).filter(Boolean);
+  const missing = [];
+  let html = headerRow();
+  for (const word of words) {
+    const wordIdx = DATA.index.get(word);
+    if (wordIdx === undefined) { missing.push(word); continue; }
+    const isJa = DATA.langs && DATA.langs[wordIdx] === 'ja';
+    const label = `<span class="${isJa ? 'wja' : ''}">${word}</span>`;
+    html += `<div class="row">${buildAxisRow(wordIdx, axis, squaredDistances(wordIdx, vocabSize), enOnly, label, false)}</div>`;
+  }
+  gridEl.innerHTML = html;
+
+  const found = words.length - missing.length;
+  statusEl.textContent = `axis ${axis} across ${found} word(s)` +
+    (missing.length ? ` — not found: ${missing.join(', ')}` : '');
+}
+
+// render whichever view is active
+function run() {
+  if (!DATA) return;
+  gridEl.classList.toggle('dimmode', focusAxis !== null);
+  focusAxis === null ? renderAllAxes() : renderCompare();
+}
+
+// ---- view switching ----
+function openCompare(axis) {
+  focusAxis = axis;
+  dimBar.style.display = '';
+  if (!multiInput.value.trim())
+    multiInput.value = (queryInput.value.trim() || 'king') + ' queen man woman';
   run();
 }
-function exitDim(){ focusDim=null; document.getElementById('dimbar').style.display='none'; run(); }
+function closeCompare() {
+  focusAxis = null;
+  dimBar.style.display = 'none';
+  run();
+}
 
-grid.addEventListener('click',e=>{ const h=e.target.closest('.dhead.click[data-dim]'); if(h) enterDim(+h.dataset.dim); });
-document.getElementById('back').addEventListener('click',exitDim);
-multi.addEventListener('input',()=>{clearTimeout(multi._t);multi._t=setTimeout(run,300);});
-document.getElementById('ja').addEventListener('change',run);
-q.addEventListener('keydown',e=>{if(e.key==='Enter')exitDim();});
-q.addEventListener('input',()=>{clearTimeout(q._t);q._t=setTimeout(exitDim,250);});
+// ---- events ----
+const debounce = (fn, ms) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
+
+gridEl.addEventListener('click', e => {
+  const header = e.target.closest('.dhead.click[data-dim]');
+  if (header) openCompare(+header.dataset.dim);
+});
+backBtn.addEventListener('click', closeCompare);
+jaToggle.addEventListener('change', run);
+multiInput.addEventListener('input', debounce(run, 300));
+queryInput.addEventListener('keydown', e => { if (e.key === 'Enter') closeCompare(); });
+queryInput.addEventListener('input', debounce(closeCompare, 250));
 </script>
