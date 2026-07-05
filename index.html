@@ -16,7 +16,17 @@
   .cell b{display:flex;gap:4px;align-items:baseline;color:#e6edf3}
   .cell b span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cell i{color:#6e7681;font-style:normal;font-size:11px;flex:none}
-  .dhead{color:#6e7681;background:none;border:none;padding-top:5px}
+  .dhead{color:#6e7681;background:none;border:none;padding-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dhead.click{cursor:pointer}
+  .dhead.click:hover{color:#58a6ff;text-decoration:underline}
+  #grid.dimmode .row{grid-template-columns:104px repeat(11,1fr)}   /* wider label column for words */
+  #grid.dimmode .dhead{color:#58a6ff;font-weight:600;font-size:14px}
+  #grid.dimmode .dhead .wja{color:#d2a8ff}
+  #dimbar{margin:12px 0;display:flex;align-items:center;gap:10px}
+  #dimbar button{background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:7px 11px;border-radius:6px;cursor:pointer}
+  #dimbar button:hover{border-color:#58a6ff}
+  #dimbar #dimlabel{color:#8b949e;font-weight:600}
+  #dimbar #multi{flex:1;max-width:460px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:8px 12px;border-radius:6px}
   .far b span{color:#f0883e}      /* words at the axis extremes */
   .self{background:#132133;border-color:#1f6feb}  /* bucket the word falls in */
   .row:hover .cell.self{background:#1b3350}
@@ -35,6 +45,11 @@
 <p class="sub">ConceptNet Numberbatch 300d, 12k english + 12k <span style="color:#d2a8ff">japanese</span> words in one aligned space. Each row is one axis, split into 11 equal buckets from <span style="color:#f0883e">lowest</span> to <span style="color:#f0883e">highest</span> value. Each bucket shows the 5 words in that band that are <b>otherwise most similar</b> to <span style="color:#58a6ff">your word</span> (nearest on all other axes). Japanese neighbours show the cross-lingual alignment.</p>
 <input id="q" placeholder="type a word, e.g. king" autocomplete="off" spellcheck="false">
 <label style="margin-left:12px;color:#8b949e;user-select:none"><input type="checkbox" id="ja" checked> include <span style="color:#d2a8ff">japanese</span></label>
+<div id="dimbar" style="display:none">
+  <button id="back">← all dimensions</button>
+  <span id="dimlabel"></span>
+  <input id="multi" placeholder="words to compare, e.g. king queen man woman" autocomplete="off" spellcheck="false">
+</div>
 <div id="status">loading vectors…</div>
 <div id="top"></div>
 <div id="grid"></div>
@@ -74,49 +89,86 @@ function cell(idxs,d,cls,qi){
   return `<div class="cell ${cls}">${inner}</div>`;
 }
 
-function run(){
-  if(!W) return;
+let focusDim=null;                       // null = all-dimensions view; number = single-axis compare
+const multi=document.getElementById('multi');
+const effN=()=>document.getElementById('ja').checked?W.words.length:W.enCount; // ja words are last; capping drops them
+function headerRow(){
+  let head='<div class="cell colhead">axis</div>';
+  for(let b=0;b<NB;b++) head+=`<div class="cell colhead">${Math.round((b+0.5)/NB*100)}%</div>`;
+  return `<div class="row">${head}</div>`;
+}
+// squared distance from word qi to every word, over ALL dims (depends on the word, not the axis)
+function fullDist(qi,N){
+  const qv=W.vecs[qi], D=qv.length, fs=new Float64Array(N);
+  for(let i=0;i<N;i++){ if(i===qi) continue; const v=W.vecs[i]; let s=0; for(let k=0;k<D;k++){const dk=v[k]-qv[k]; s+=dk*dk;} fs[i]=s; }
+  return fs;
+}
+// one bucket row: word qi sampled along axis d. clickable=true tags the header for axis-focus.
+function bucketCells(qi,d,fullSq,enOnly,label,clickable){
+  const qv=W.vecs[qi];
+  let order=W.orders[d];
+  if(enOnly){ const f=[]; for(let j=0;j<order.length;j++){const i=order[j]; if(i<W.enCount) f.push(i);} order=f; }
+  const M=order.length;
+  const qb=Math.min(NB-1,Math.floor(order.indexOf(qi)*NB/M)); // bucket the query falls in
+  let cells=`<div class="cell dhead${clickable?' click" data-dim="'+d+'" title="compare words on this axis':''}">${label}</div>`;
+  for(let b=0;b<NB;b++){
+    const lo=Math.floor(b*M/NB), hi=Math.floor((b+1)*M/NB);
+    // candidates in this axis-band, ranked by distance to query on the OTHER dims (full − this dim)
+    const cand=[];
+    for(let j=lo;j<hi;j++){ const i=order[j]; const dd=W.vecs[i][d]-qv[d]; cand.push([i,fullSq[i]-dd*dd]); }
+    cand.sort((a,b)=>a[1]-b[1]);
+    const idxs=cand.slice(0,5).map(x=>x[0]);
+    const cls=b===qb?'self':((b===0||b===NB-1)?'far':'');
+    cells+=cell(idxs,d,cls,qi);
+  }
+  return cells;
+}
+
+function run(){ if(!W) return; grid.classList.toggle('dimmode',focusDim!==null); focusDim===null?renderAll():renderDim(); }
+
+function renderAll(){                     // one row per dimension, single query word
   const w=q.value.trim().toLowerCase();
   location.hash=encodeURIComponent(w);
   const qi=W.index.get(w);
   if(qi===undefined){ grid.innerHTML=''; topEl.innerHTML=''; status.textContent=`"${w}" not in vocabulary.`; return; }
-  const N=document.getElementById('ja').checked?W.words.length:W.enCount; // ja words are last; capping N drops them
-  // top 10 nearest overall (cosine, whole space)
+  const N=effN(), enOnly=N!==W.words.length;
   topEl.innerHTML='<h2>10 nearest overall (cosine):</h2>'+nearest(qi,10,N).map(([i,s])=>
     `<span class="chip ${W.langs&&W.langs[i]==='ja'?'ja':''}"><b>${W.words[i]}</b><i>${s.toFixed(3)}</i></span>`).join('');
-  status.textContent=`“${w}” — each bucket: words in that axis-band, nearest to “${w}” on the other ${W.dim-1} axes:`;
-  const qv=W.vecs[qi], D=qv.length;
-  // squared distance from every word to the query across ALL dims (computed once)
-  const fullSq=new Float64Array(N);
-  for(let i=0;i<N;i++){ if(i===qi) continue; const v=W.vecs[i]; let s=0; for(let k=0;k<D;k++){const dk=v[k]-qv[k]; s+=dk*dk;} fullSq[i]=s; }
-  // header row: bucket position as percentile along the axis
-  let head='<div class="cell colhead">axis</div>';
-  for(let b=0;b<NB;b++) head+=`<div class="cell colhead">${Math.round((b+0.5)/NB*100)}%</div>`;
-  let html=`<div class="row">${head}</div>`;
-
-  const enOnly=N!==W.words.length;
-  for(let d=0;d<D;d++){
-    // precomputed axis order; drop ja (indices >= enCount) when disabled
-    let order=W.orders[d];
-    if(enOnly){ const f=[]; for(let j=0;j<order.length;j++){const i=order[j]; if(i<W.enCount) f.push(i);} order=f; }
-    const M=order.length;
-    const qb=Math.min(NB-1,Math.floor(order.indexOf(qi)*NB/M)); // bucket the query falls in
-    let cells=`<div class="cell dhead">dim ${d}</div>`;
-    for(let b=0;b<NB;b++){
-      const lo=Math.floor(b*M/NB), hi=Math.floor((b+1)*M/NB);
-      // candidates in this axis-band, ranked by distance to query on the OTHER dims (full − this dim)
-      const cand=[];
-      for(let j=lo;j<hi;j++){ const i=order[j]; const dd=W.vecs[i][d]-qv[d]; cand.push([i,fullSq[i]-dd*dd]); }
-      cand.sort((a,b)=>a[1]-b[1]);
-      const idxs=cand.slice(0,5).map(x=>x[0]);
-      const cls=b===qb?'self':((b===0||b===NB-1)?'far':'');
-      cells+=cell(idxs,d,cls,qi);
-    }
-    html+=`<div class="row">${cells}</div>`;
-  }
+  status.textContent=`“${w}” — each bucket: words in that axis-band, nearest to “${w}” on the other ${W.dim-1} axes (click a dim to compare words):`;
+  const fullSq=fullDist(qi,N);
+  let html=headerRow();
+  for(let d=0;d<W.dim;d++) html+=`<div class="row">${bucketCells(qi,d,fullSq,enOnly,'dim '+d,true)}</div>`;
   grid.innerHTML=html;
 }
+
+function renderDim(){                     // one row per word, single focused axis
+  const d=focusDim, N=effN(), enOnly=N!==W.words.length;
+  document.getElementById('dimlabel').textContent=`dim ${d}`;
+  topEl.innerHTML='';
+  const wl=multi.value.trim().toLowerCase().split(/[\s,]+/).filter(Boolean);
+  let html=headerRow(); const missing=[];
+  for(const w of wl){
+    const qi=W.index.get(w);
+    if(qi===undefined){ missing.push(w); continue; }
+    const label=`<span class="wlabel${W.langs&&W.langs[qi]==='ja'?' wja':''}">${w}</span>`;
+    html+=`<div class="row">${bucketCells(qi,d,fullDist(qi,N),enOnly,label,false)}</div>`;
+  }
+  grid.innerHTML=html;
+  status.textContent=`axis ${d} across ${wl.length-missing.length} word(s)`+(missing.length?` — not found: ${missing.join(', ')}`:'');
+}
+
+function enterDim(d){
+  focusDim=d;
+  document.getElementById('dimbar').style.display='';
+  if(!multi.value.trim()) multi.value=(q.value.trim()||'king')+' queen man woman';
+  run();
+}
+function exitDim(){ focusDim=null; document.getElementById('dimbar').style.display='none'; run(); }
+
+grid.addEventListener('click',e=>{ const h=e.target.closest('.dhead.click[data-dim]'); if(h) enterDim(+h.dataset.dim); });
+document.getElementById('back').addEventListener('click',exitDim);
+multi.addEventListener('input',()=>{clearTimeout(multi._t);multi._t=setTimeout(run,300);});
 document.getElementById('ja').addEventListener('change',run);
-q.addEventListener('keydown',e=>{if(e.key==='Enter')run();});
-q.addEventListener('input',()=>{clearTimeout(q._t);q._t=setTimeout(run,250);});
+q.addEventListener('keydown',e=>{if(e.key==='Enter')exitDim();});
+q.addEventListener('input',()=>{clearTimeout(q._t);q._t=setTimeout(exitDim,250);});
 </script>
