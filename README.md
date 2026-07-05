@@ -28,8 +28,8 @@ python3 -m http.server 8017   # then open http://localhost:8017
 ## Rebuild the data (optional)
 
 `vectors.json` is committed, so you don't need this to deploy. To regenerate it,
-merge English + Japanese from Numberbatch (uses `ja_freq.txt` for the Japanese
-word list and `vectors.glove.json` for the common English words, both committed):
+merge English + Japanese from Numberbatch (uses `en_freq.txt` and `ja_freq.txt`,
+the frequency word lists, both committed — top ~12k of each language):
 
 ```sh
 curl -s https://conceptnet.s3.amazonaws.com/downloads/2019/numberbatch/numberbatch-19.08.txt.gz \

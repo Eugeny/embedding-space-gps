@@ -32,7 +32,7 @@
   .chip i{color:#6e7681;font-style:normal;font-size:11px}
 </style>
 <h1>token neighbours by dimension</h1>
-<p class="sub">ConceptNet Numberbatch 300d, 5000 english + 4000 <span style="color:#d2a8ff">japanese</span> words in one aligned space. Each row is one axis, split into 11 equal buckets from <span style="color:#f0883e">lowest</span> to <span style="color:#f0883e">highest</span> value. Each bucket shows the 5 words in that band that are <b>otherwise most similar</b> to <span style="color:#58a6ff">your word</span> (nearest on all other axes). Japanese neighbours show the cross-lingual alignment.</p>
+<p class="sub">ConceptNet Numberbatch 300d, 12k english + 12k <span style="color:#d2a8ff">japanese</span> words in one aligned space. Each row is one axis, split into 11 equal buckets from <span style="color:#f0883e">lowest</span> to <span style="color:#f0883e">highest</span> value. Each bucket shows the 5 words in that band that are <b>otherwise most similar</b> to <span style="color:#58a6ff">your word</span> (nearest on all other axes). Japanese neighbours show the cross-lingual alignment.</p>
 <input id="q" placeholder="type a word, e.g. king" autocomplete="off" spellcheck="false">
 <label style="margin-left:12px;color:#8b949e;user-select:none"><input type="checkbox" id="ja" checked> include <span style="color:#d2a8ff">japanese</span></label>
 <div id="status">loading vectors…</div>
@@ -48,8 +48,13 @@ fetch('vectors.json').then(r=>r.json()).then(d=>{
   d.norms=d.vecs.map(v=>{let s=0;for(const x of v)s+=x*x;return Math.sqrt(s);}); // for cosine
   d.enCount=d.langs?d.langs.indexOf('ja'):d.words.length; if(d.enCount<0)d.enCount=d.words.length; // en words are first
 
-  W=d; status.textContent=`${d.words.length} words loaded (en + ja, aligned). try an english word.`;
-  if(location.hash) { q.value=decodeURIComponent(location.hash.slice(1)); run(); }
+  status.textContent=`${d.words.length} words loaded — indexing ${d.dim} axes…`;
+  setTimeout(()=>{ // sort every axis once so queries don't have to (keeps it fast at 24k words)
+    const N=d.words.length, D=d.dim; d.orders=[];
+    for(let dd=0;dd<D;dd++){ const ord=Int32Array.from({length:N},(_,i)=>i); ord.sort((a,b)=>d.vecs[a][dd]-d.vecs[b][dd]); d.orders.push(ord); }
+    W=d; status.textContent=`${d.words.length} words loaded (en + ja, aligned). try an english word.`;
+    if(location.hash) { q.value=decodeURIComponent(location.hash.slice(1)); run(); }
+  },0);
 }).catch(e=>status.textContent='failed to load vectors.json — serve this folder over http (see note).');
 
 const NB=11; // buckets per axis (columns)
@@ -88,14 +93,19 @@ function run(){
   for(let b=0;b<NB;b++) head+=`<div class="cell colhead">${Math.round((b+0.5)/NB*100)}%</div>`;
   let html=`<div class="row">${head}</div>`;
 
+  const enOnly=N!==W.words.length;
   for(let d=0;d<D;d++){
-    const order=Array.from({length:N},(_,i)=>i).sort((a,b)=>W.vecs[a][d]-W.vecs[b][d]); // by axis-d value
-    const qb=Math.min(NB-1,Math.floor(order.indexOf(qi)*NB/N)); // bucket the query falls in
+    // precomputed axis order; drop ja (indices >= enCount) when disabled
+    let order=W.orders[d];
+    if(enOnly){ const f=[]; for(let j=0;j<order.length;j++){const i=order[j]; if(i<W.enCount) f.push(i);} order=f; }
+    const M=order.length;
+    const qb=Math.min(NB-1,Math.floor(order.indexOf(qi)*NB/M)); // bucket the query falls in
     let cells=`<div class="cell dhead">dim ${d}</div>`;
     for(let b=0;b<NB;b++){
-      const lo=Math.floor(b*N/NB), hi=Math.floor((b+1)*N/NB);
+      const lo=Math.floor(b*M/NB), hi=Math.floor((b+1)*M/NB);
       // candidates in this axis-band, ranked by distance to query on the OTHER dims (full − this dim)
-      const cand=order.slice(lo,hi).map(i=>{const dd=W.vecs[i][d]-qv[d]; return [i,fullSq[i]-dd*dd];});
+      const cand=[];
+      for(let j=lo;j<hi;j++){ const i=order[j]; const dd=W.vecs[i][d]-qv[d]; cand.push([i,fullSq[i]-dd*dd]); }
       cand.sort((a,b)=>a[1]-b[1]);
       const idxs=cand.slice(0,5).map(x=>x[0]);
       const cls=b===qb?'self':((b===0||b===NB-1)?'far':'');
