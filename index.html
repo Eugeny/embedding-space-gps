@@ -27,6 +27,10 @@
   #dimbar button:hover{border-color:#58a6ff}
   #dimbar #dimlabel{color:#8b949e;font-weight:600}
   #dimbar #multi{flex:1;max-width:460px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:8px 12px;border-radius:6px}
+  #diffbar{margin:12px 0 0;display:flex;align-items:center;gap:8px;color:#8b949e}
+  #diffbar input{width:150px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:7px 10px;border-radius:6px}
+  #diffbar button{background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:7px 12px;border-radius:6px;cursor:pointer}
+  #diffbar button:hover{border-color:#58a6ff}
   .far b span{color:#f0883e}      /* words at the axis extremes */
   .self{background:#132133;border-color:#1f6feb}  /* bucket the word falls in */
   .row:hover .cell.self{background:#1b3350}
@@ -45,6 +49,12 @@
 <p class="sub">ConceptNet Numberbatch 300d, 12k english + 12k <span style="color:#d2a8ff">japanese</span> words in one aligned space. Each row is one axis, split into 11 equal buckets from <span style="color:#f0883e">lowest</span> to <span style="color:#f0883e">highest</span> value. Each bucket shows the 5 words in that band that are <b>otherwise most similar</b> to <span style="color:#58a6ff">your word</span> (nearest on all other axes). Japanese neighbours show the cross-lingual alignment.</p>
 <input id="q" placeholder="type a word, e.g. king" autocomplete="off" spellcheck="false">
 <label style="margin-left:12px;color:#8b949e;user-select:none"><input type="checkbox" id="ja" checked> include <span style="color:#d2a8ff">japanese</span></label>
+<div id="diffbar">
+  <span>most-different axes of two words:</span>
+  <input id="wa" placeholder="word a" autocomplete="off" spellcheck="false">
+  <input id="wb" placeholder="word b" autocomplete="off" spellcheck="false">
+  <button id="diffbtn">show</button>
+</div>
 <div id="dimbar" style="display:none">
   <button id="back">← all dimensions</button>
   <span id="dimlabel"></span>
@@ -66,6 +76,9 @@ const dimBar     = document.getElementById('dimbar');
 const dimLabel   = document.getElementById('dimlabel');
 const multiInput = document.getElementById('multi');
 const backBtn    = document.getElementById('back');
+const wordAInput = document.getElementById('wa');
+const wordBInput = document.getElementById('wb');
+const diffBtn    = document.getElementById('diffbtn');
 
 // ---- constants ----
 const BUCKETS = 11;      // columns: each axis is split into this many value bands
@@ -73,7 +86,8 @@ const PER_BUCKET = 5;    // words shown inside each bucket
 
 // ---- state ----
 let DATA = null;         // {dim, words[], vecs[][], langs[], index, norms[], enCount, orders[]}
-let focusAxis = null;    // null = all-axes view; a number = single-axis compare view
+let view = 'all';        // 'all' | 'compare' | 'diff'
+let focusAxis = null;    // axis shown in the compare view
 
 // ---- load & index the embedding data ----
 // vectors.json.gz is ~10MB (vs 46MB raw) so GitHub Pages can deploy it; we decompress it in the browser.
@@ -135,13 +149,17 @@ function squaredDistances(wordIdx, vocabSize) {
   return dist;
 }
 
-// the percentile column header shown above every grid
-function headerRow() {
-  let cells = '<div class="cell colhead">axis</div>';
+// the percentile column header shown above a grid (first column labelled `firstCol`)
+function headerRow(firstCol = 'axis') {
+  let cells = `<div class="cell colhead">${firstCol}</div>`;
   for (let b = 0; b < BUCKETS; b++)
     cells += `<div class="cell colhead">${Math.round((b + 0.5) / BUCKETS * 100)}%</div>`;
   return `<div class="row">${cells}</div>`;
 }
+
+// a row-header word label, tinted purple for japanese
+const wordLabel = (word, idx) =>
+  `<span class="${DATA.langs && DATA.langs[idx] === 'ja' ? 'wja' : ''}">${word}</span>`;
 
 // one grid cell holding up to PER_BUCKET word tokens (word + its value on this axis)
 function renderCell(wordIdxs, axis, cellClass, queryIdx) {
@@ -239,9 +257,7 @@ function renderCompare() {
   for (const word of words) {
     const wordIdx = DATA.index.get(word);
     if (wordIdx === undefined) { missing.push(word); continue; }
-    const isJa = DATA.langs && DATA.langs[wordIdx] === 'ja';
-    const label = `<span class="${isJa ? 'wja' : ''}">${word}</span>`;
-    html += `<div class="row">${buildAxisRow(wordIdx, axis, squaredDistances(wordIdx, vocabSize), enOnly, label, false)}</div>`;
+    html += `<div class="row">${buildAxisRow(wordIdx, axis, squaredDistances(wordIdx, vocabSize), enOnly, wordLabel(word, wordIdx), false)}</div>`;
   }
   gridEl.innerHTML = html;
 
@@ -250,23 +266,61 @@ function renderCompare() {
     (missing.length ? ` — not found: ${missing.join(', ')}` : '');
 }
 
+// diff view: the 5 axes where two words differ most, each shown as both words' rows
+function renderDiff() {
+  const a = wordAInput.value.trim().toLowerCase();
+  const b = wordBInput.value.trim().toLowerCase();
+  const ai = DATA.index.get(a), bi = DATA.index.get(b);
+  topEl.innerHTML = '';
+
+  const missing = [];
+  if (ai === undefined) missing.push(`"${a}"`);
+  if (bi === undefined) missing.push(`"${b}"`);
+  if (missing.length) { gridEl.innerHTML = ''; statusEl.textContent = `${missing.join(' and ')} not in vocabulary.`; return; }
+
+  // rank axes by how far apart the two words sit on them
+  const va = DATA.vecs[ai], vb = DATA.vecs[bi], perAxis = [];
+  for (let axis = 0; axis < DATA.dim; axis++) perAxis.push([axis, Math.abs(va[axis] - vb[axis])]);
+  perAxis.sort((x, y) => y[1] - x[1]);
+
+  const vocabSize = activeVocabSize(), enOnly = vocabSize !== DATA.words.length;
+  const distA = squaredDistances(ai, vocabSize), distB = squaredDistances(bi, vocabSize);
+
+  let html = '';
+  for (const [axis, delta] of perAxis.slice(0, 5)) {
+    html += headerRow(`dim ${axis} · Δ${delta.toFixed(2)}`);
+    html += `<div class="row">${buildAxisRow(ai, axis, distA, enOnly, wordLabel(a, ai), false)}</div>`;
+    html += `<div class="row">${buildAxisRow(bi, axis, distB, enOnly, wordLabel(b, bi), false)}</div>`;
+  }
+  gridEl.innerHTML = html;
+  statusEl.textContent = `top 5 axes where “${a}” and “${b}” differ most (their blue buckets sit far apart):`;
+}
+
 // render whichever view is active
 function run() {
   if (!DATA) return;
-  gridEl.classList.toggle('dimmode', focusAxis !== null);
-  focusAxis === null ? renderAllAxes() : renderCompare();
+  gridEl.classList.toggle('dimmode', view !== 'all');   // wider label column when rows are labelled by word
+  if (view === 'compare') renderCompare();
+  else if (view === 'diff') renderDiff();
+  else renderAllAxes();
 }
 
 // ---- view switching ----
 function openCompare(axis) {
-  focusAxis = axis;
+  view = 'compare'; focusAxis = axis;
   dimBar.style.display = '';
   if (!multiInput.value.trim())
     multiInput.value = (queryInput.value.trim() || 'king') + ' queen man woman';
   run();
 }
-function closeCompare() {
-  focusAxis = null;
+function openDiff() {
+  view = 'diff';
+  dimBar.style.display = 'none';
+  if (!wordAInput.value.trim() && !wordBInput.value.trim()) { wordAInput.value = 'king'; wordBInput.value = 'queen'; }
+  run();
+}
+function returnToAll() {
+  view = 'all';
   dimBar.style.display = 'none';
   run();
 }
@@ -278,9 +332,16 @@ gridEl.addEventListener('click', e => {
   const header = e.target.closest('.dhead.click[data-dim]');
   if (header) openCompare(+header.dataset.dim);
 });
-backBtn.addEventListener('click', closeCompare);
+backBtn.addEventListener('click', returnToAll);
 jaToggle.addEventListener('change', run);
 multiInput.addEventListener('input', debounce(run, 300));
-queryInput.addEventListener('keydown', e => { if (e.key === 'Enter') closeCompare(); });
-queryInput.addEventListener('input', debounce(closeCompare, 250));
+queryInput.addEventListener('keydown', e => { if (e.key === 'Enter') returnToAll(); });
+queryInput.addEventListener('input', debounce(returnToAll, 250));
+
+diffBtn.addEventListener('click', openDiff);
+const tryDiff = debounce(() => { if (wordAInput.value.trim() && wordBInput.value.trim()) openDiff(); }, 300);
+wordAInput.addEventListener('input', tryDiff);
+wordBInput.addEventListener('input', tryDiff);
+wordAInput.addEventListener('keydown', e => { if (e.key === 'Enter') openDiff(); });
+wordBInput.addEventListener('keydown', e => { if (e.key === 'Enter') openDiff(); });
 </script>
