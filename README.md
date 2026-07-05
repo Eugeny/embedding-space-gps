@@ -7,8 +7,10 @@ Numberbatch 300d), so `king` finds `王`, `国王`, `キング`.
 
 **Live:** enable GitHub Pages (below), then visit the Pages URL.
 
-Single static page: [`index.html`](index.html) + [`vectors.json`](vectors.json)
-(9k words × 300d). No backend — everything runs in the browser.
+Single static page: [`index.html`](index.html) + `vectors.json.gz`
+(24k words × 300d, ~10MB gzipped). No backend — the page fetches the gzip and
+decompresses it in the browser via `DecompressionStream`. (Committed gzipped
+because the 46MB raw JSON is too large for GitHub Pages to deploy.)
 
 ## Run locally
 
@@ -34,4 +36,5 @@ the frequency word lists, both committed — top ~12k of each language):
 ```sh
 curl -s https://conceptnet.s3.amazonaws.com/downloads/2019/numberbatch/numberbatch-19.08.txt.gz \
   | python3 build_ml.py
+gzip -9 -f vectors.json          # the site serves vectors.json.gz
 ```

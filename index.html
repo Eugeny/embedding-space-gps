@@ -43,7 +43,8 @@ let W=null; // {dimension, words, vecs, index}
 const status=document.getElementById('status'), grid=document.getElementById('grid'), q=document.getElementById('q');
 const SIDE=5; // words per side per axis
 
-fetch('vectors.json').then(r=>r.json()).then(d=>{
+// vectors.json.gz is ~10MB (vs 46MB raw) so GitHub Pages can deploy it; decompress in the browser
+fetch('vectors.json.gz').then(r=>r.body.pipeThrough(new DecompressionStream('gzip'))).then(s=>new Response(s).json()).then(d=>{
   d.index=new Map(); d.words.forEach((w,i)=>{if(!d.index.has(w))d.index.set(w,i);}); // prefer first (english)
   d.norms=d.vecs.map(v=>{let s=0;for(const x of v)s+=x*x;return Math.sqrt(s);}); // for cosine
   d.enCount=d.langs?d.langs.indexOf('ja'):d.words.length; if(d.enCount<0)d.enCount=d.words.length; // en words are first

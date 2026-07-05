@@ -3,3 +3,6 @@ glove50.gz
 build.log
 .claude/
 .DS_Store
+
+# large raw data — committed gzipped as vectors.json.gz instead (Pages deploy chokes on 46MB)
+vectors.json
