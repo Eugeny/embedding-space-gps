@@ -1,0 +1,5 @@
+# build artifacts / large downloads (re-fetchable; not needed to serve the site)
+glove50.gz
+build.log
+.claude/
+.DS_Store
