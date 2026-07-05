@@ -1,0 +1,84 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>token neighbours by dimension</title>
+<style>
+  :root{color-scheme:dark}
+  body{background:#0e1116;color:#c9d1d9;font:13px/1.4 ui-monospace,Menlo,monospace;margin:0;padding:24px}
+  h1{font-size:16px;font-weight:600;margin:0 0 4px}
+  p.sub{color:#8b949e;margin:0 0 16px}
+  #q{background:#161b22;border:1px solid #30363d;color:#c9d1d9;font:inherit;padding:8px 12px;border-radius:6px;width:280px}
+  #status{margin:12px 0;color:#8b949e}
+  #grid{display:flex;flex-direction:column;gap:3px}
+  .row{display:grid;gap:3px;grid-template-columns:44px repeat(11,1fr);align-items:stretch;border-radius:6px}
+  .row:hover{background:#161b2280}
+  .row:hover .cell{border-color:#30363d;background:#1c2331}
+  .cell{padding:3px 5px;border-radius:5px;background:#161b22;border:1px solid #21262d;overflow:hidden;min-width:0}
+  .cell b{display:flex;gap:4px;align-items:baseline;color:#e6edf3}
+  .cell b span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cell i{color:#6e7681;font-style:normal;font-size:11px;flex:none}
+  .dhead{color:#6e7681;background:none;border:none;padding-top:5px}
+  .far b span{color:#f0883e}      /* words at the axis extremes */
+  .self{background:#132133;border-color:#1f6feb}  /* bucket the word falls in */
+  .row:hover .cell.self{background:#1b3350}
+  .cell b.q span{color:#58a6ff;font-weight:700}   /* the queried word itself */
+  .colhead{color:#6e7681;font-size:11px;background:none;border:none;text-align:center;padding-bottom:2px}
+</style>
+<h1>token neighbours by dimension</h1>
+<p class="sub">GloVe 50d, top 8000 words. Each row is one axis, split into 11 equal buckets from <span style="color:#f0883e">lowest</span> to <span style="color:#f0883e">highest</span> value (5 words each). <span style="color:#58a6ff">Your word</span> sits in the bucket it actually falls into — so it shifts left/right per axis.</p>
+<input id="q" placeholder="type a word, e.g. king" autocomplete="off" spellcheck="false">
+<div id="status">loading vectors…</div>
+<div id="grid"></div>
+<script>
+let W=null; // {dim, words, vecs, index}
+const status=document.getElementById('status'), grid=document.getElementById('grid'), q=document.getElementById('q');
+const SIDE=5; // words per side per axis
+
+fetch('vectors.json').then(r=>r.json()).then(d=>{
+  d.index=new Map(d.words.map((w,i)=>[w,i]));
+  W=d; status.textContent=`${d.words.length} words loaded. try a word.`;
+  if(location.hash) { q.value=decodeURIComponent(location.hash.slice(1)); run(); }
+}).catch(e=>status.textContent='failed to load vectors.json — serve this folder over http (see note).');
+
+const NB=11; // buckets per axis (columns)
+function cell(idxs,d,cls,qi){
+  const inner=idxs.map(i=>{
+    const q=i===qi?' class="q"':'';
+    return `<b${q} title="${W.words[i]} — axis ${d}: ${W.vecs[i][d].toFixed(3)}"><span>${W.words[i]}</span><i>${W.vecs[i][d].toFixed(2)}</i></b>`;
+  }).join('');
+  return `<div class="cell ${cls}">${inner}</div>`;
+}
+
+function run(){
+  if(!W) return;
+  const w=q.value.trim().toLowerCase();
+  location.hash=encodeURIComponent(w);
+  const qi=W.index.get(w);
+  if(qi===undefined){ grid.innerHTML=''; status.textContent=`"${w}" not in vocabulary (top 8000 common words only).`; return; }
+  status.textContent=`“${w}” placed in its actual bucket along each of ${W.dim} axes (lowest → highest value):`;
+  const N=W.words.length;
+  // header row: bucket position as percentile along the axis
+  let head='<div class="cell colhead">axis</div>';
+  for(let b=0;b<NB;b++) head+=`<div class="cell colhead">${Math.round((b+0.5)/NB*100)}%</div>`;
+  let html=`<div class="row">${head}</div>`;
+
+  for(let d=0;d<W.dim;d++){
+    // rank all words along this axis (ascending value)
+    const order=Array.from({length:N},(_,i)=>i).sort((a,b)=>W.vecs[a][d]-W.vecs[b][d]);
+    const qr=order.indexOf(qi);                 // query's rank on this axis
+    const qb=Math.min(NB-1,Math.floor(qr*NB/N)); // bucket the query falls in
+    let cells=`<div class="cell dhead">dim ${d}</div>`;
+    for(let b=0;b<NB;b++){
+      // for the query bucket, center the 5 words on the query itself; else on bucket center
+      const center=b===qb?qr:Math.round((b+0.5)*N/NB);
+      const start=Math.max(0,Math.min(N-5,center-2));
+      const idxs=order.slice(start,start+5);
+      const cls=b===qb?'self':((b===0||b===NB-1)?'far':'');
+      cells+=cell(idxs,d,cls,qi);
+    }
+    html+=`<div class="row">${cells}</div>`;
+  }
+  grid.innerHTML=html;
+}
+q.addEventListener('keydown',e=>{if(e.key==='Enter')run();});
+q.addEventListener('input',()=>{clearTimeout(q._t);q._t=setTimeout(run,250);});
+</script>
